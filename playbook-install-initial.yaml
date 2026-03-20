@@ -1,0 +1,552 @@
+---
+# Título: Playbook para crear un nuevo repositorio, su webhook y notificar
+# Ejecutable desde AAP/AWX
+- name: Install components in Openshift
+  hosts: localhost
+  connection: local
+  gather_facts: no
+
+  vars:
+    crc_url_api_client: "https://api.cluster-bbz5b.dynamic.redhatworkshops.io:6443"
+    crc_user: "admin"
+    crc_password: "MTMyNjMw"
+    crc_validate_certs: false
+
+    awx_host: example-ansible-automation-platform.apps.cluster-bbz5b.dynamic.redhatworkshops.io
+    awx_user: admin
+    awx_password: admin
+
+  tasks:
+
+    - name: 
+      shell: "oc login --insecure-skip-tls-verify -u {{crc_user}} -p {{crc_password}} {{crc_url_api_client}} "
+
+    - name: 
+      shell: oc whoami --show-token
+      register: token
+
+    - name: Install AAP Operator
+      kubernetes.core.k8s:
+        state: present
+        host: "{{ crc_url_api_client }}"
+        api_key: "{{ token.stdout }}"
+        validate_certs: "{{crc_validate_certs}}"
+        src: automation-platform-install-operator.yaml
+      register: step
+      until: step.result.results| json_query('[?result.status.currentCSV]| [0].result.status.currentCSV') is defined and (step.result.results | json_query('[?result.status.currentCSV] | [0].result.status.currentCSV')) is not none
+      retries: "25"
+      delay: "20"
+
+    - name: Report Operator Status
+      ansible.builtin.debug:
+        msg: "{{step.result.results| json_query('[?result.status.currentCSV]| [0].result.status.currentCSV')}}"
+
+    - name: Get ClusterServiceVersion (CSV) status
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        name: "{{step.result.results| json_query('[?result.status.currentCSV]| [0].result.status.currentCSV')}}"
+        namespace: "ansible-automation-platform"
+      register: csv_status_check
+      until: csv_status_check.resources| json_query('[?status.phase]| [0].status.phase') == "Succeeded"
+      retries: "15"
+      delay: "20"
+
+    - name: Report Operator Status
+      ansible.builtin.debug:
+        msg: "{{csv_status_check.resources| json_query('[?status.phase]| [0].status.phase')}}"
+
+    - name: Install AAP Instance
+      kubernetes.core.k8s:
+        state: present
+        host: "{{ crc_url_api_client }}"
+        api_key: "{{ token.stdout }}"
+        validate_certs: "{{crc_validate_certs}}"
+        src: automation-platform-install-ansible-automation-platform.yaml
+      register: step3
+      
+    - name: ✅ Wait for the URL to be available (HTTP 200)
+      ansible.builtin.uri:
+        url: "https://{{awx_host}}/api/controller/v2/config/"
+        method: GET
+        status_code: 401 # The desired HTTP status code
+        validate_certs: false # Set to true if using proper SSL/TLS certificates
+      register: app_status_check
+      until: app_status_check.status == 401
+      retries: "50"
+      delay: "20"
+      delegate_to: localhost
+
+    - name: "Get the Authentication Token for the future requests"
+      ansible.builtin.uri:
+        url: "https://{{ awx_host }}/api/gateway/v1/tokens/"
+        user: "{{ awx_user }}"
+        password: "{{ awx_password }}"
+        method: POST
+        force_basic_auth: true
+        validate_certs: false
+        status_code: 201
+      register: authtoken_res
+
+    - name: "Set the oauth token to be used since now"
+      ansible.builtin.set_fact:
+        aap_token: "{{ authtoken_res.json.token }}"
+        aap_oauthtoken_url: "{{ authtoken_res.json.url }}"
+
+    - name: Set the license using a file
+      ansible.controller.license:
+        manifest: "../manifest_AAP2.6_20260303T154318Z.zip"
+        controller_host: "{{ awx_host }}"
+        aap_token: "{{ aap_token }}"
+        # controller_username: "{{ awx_user }}"
+        # controller_password: "{{ awx_password }}"
+        validate_certs: false
+      register: app_status_check
+      until: app_status_check  is succeeded
+      retries: "15"
+      delay: "15"
+      delegate_to: localhost
+
+    - name: Openshift Virtualization Sub Yaml push on openshift
+      kubernetes.core.k8s:
+        host: "{{ crc_url_api_client }}"
+        api_key: "{{ token.stdout }}"
+        validate_certs: "{{crc_validate_certs}}"
+        state: present
+        src: openshift-virtualization.yaml
+      register: step
+      until: step.result.results| json_query('[?result.status.currentCSV]| [0].result.status.currentCSV') is defined and (step.result.results | json_query('[?result.status.currentCSV] | [0].result.status.currentCSV')) is not none
+      retries: "10"
+      delay: "15"
+
+    - name: Report Operator Status
+      ansible.builtin.debug:
+        msg: "{{step.result.results| json_query('[?result.status.currentCSV]| [0].result.status.currentCSV')}}"
+
+    - name: Get ClusterServiceVersion (CSV) status
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        name: "{{step.result.results| json_query('[?result.status.currentCSV]| [0].result.status.currentCSV')}}"
+        namespace: "openshift-cnv"
+      register: csv_status_check
+      until: csv_status_check.resources| json_query('[?status.phase]| [0].status.phase') == "Succeeded"
+      retries: "20"
+      delay: "20"
+
+    # - name: Get a list of all pods from any namespace
+    #   redhat.openshift.k8s:
+    #     api_key: "{{ openshift_auth_results.openshift_auth.api_key }}"
+    #     state: present
+    #     src: gitea.yaml
+    #   register: pod_list
+
+    # - name: Pause for 30 minutes to build app cache
+    #   ansible.builtin.pause:
+    #     minutes: 30
+
+    # - name: AAP Controller Yaml push on openshift
+    #   redhat.openshift.k8s:
+    #     api_key: "{{ openshift_auth_results.openshift_auth.api_key }}"
+    #     state: present
+    #     src: aap-controller.yaml
+    #   register: pod_list
+
+    - name: Openahift Virtualization Hyper Converged Sub Yaml push on openshift
+      kubernetes.core.k8s:
+        host: "{{ crc_url_api_client }}"
+        api_key: "{{ token.stdout }}"
+        validate_certs: "{{crc_validate_certs}}"
+        state: present
+        src: openshift-virtualization-hyper-converged.yaml
+      register: step
+      until: step.result.status is defined and step.result.status.systemHealthStatus == "healthy"
+      retries: "15"
+      delay: "25"
+
+
+    - name: Report Operator Status
+      ansible.builtin.debug:
+        msg: "{{step.result.status.systemHealthStatus}}"
+
+
+    - name: FEdora VirtualMachine Yaml push on openshift
+      kubernetes.core.k8s:
+        host: "{{ crc_url_api_client }}"
+        api_key: "{{ token.stdout }}"
+        validate_certs: "{{crc_validate_certs}}"
+        state: present
+        src: openshift-virtualization-machine-fedora.yaml
+      register: step
+      until: step.result is defined and step.result.results| json_query('[?result.status.printableStatus]| [0].result.status.printableStatus') == 'Running'
+      retries: "10"
+      delay: "15"
+
+    - name: Pause for 3 minutes to build app cache
+      ansible.builtin.pause:
+        minutes: 2
+
+    - name: Create an EDA Credential for Container Image Repository
+      ansible.eda.credential:
+        controller_host: "{{ awx_host }}"
+        aap_token: "{{ aap_token }}"
+        # controller_username: "{{ awx_user }}"
+        # controller_password: "{{ awx_password }}"
+        validate_certs: false
+        name: "Red Hat Container Catalog"
+        description: "Red Hat Container Catalog"
+        inputs:
+          host: "registry.redhat.io"
+          password: "XXXXXX"
+          username: "adelahoz@redhat.com"
+          verify_ssl: false
+        credential_type_name: "Container Registry"
+        organization_name: Default
+        state: present
+
+    - name: Create an EDA Credential for AAP
+      ansible.eda.credential:
+        controller_host: "{{ awx_host }}"
+        aap_token: "{{ aap_token }}"
+        # controller_username: "{{ awx_user }}"
+        # controller_password: "{{ awx_password }}"
+        validate_certs: false
+        name: "AAP Connection"
+        description: "AAP Connection"
+        inputs:
+          host: "https://{{awx_host}}/api/controller/"
+          password: "admin"
+          request_timeout: "10"
+          username: "admin"
+          verify_ssl: true
+        credential_type_name: "Red Hat Ansible Automation Platform"
+        organization_name: Default
+        state: present
+
+    - name: Create EDA Decision Environment
+      ansible.eda.decision_environment:
+        controller_host: "{{ awx_host }}"
+        aap_token: "{{ aap_token }}"
+        # controller_username: "{{ awx_user }}"
+        # controller_password: "{{ awx_password }}"
+        validate_certs: false
+        name: "de-supported-rhel9:1.2"
+        description: "de-supported-rhel9:1.2"
+        image_url: "registry.redhat.io/ansible-automation-platform-26/de-supported-rhel9:1.2"
+        credential: "Red Hat Container Catalog"
+        pull_policy: "always"
+        organization_name: Default
+        state: present
+
+    - name: Crear Proyecto para el Playbook (Remediation)
+      ansible.controller.project:
+        controller_host: "{{ awx_host }}"
+        aap_token: "{{ aap_token }}"
+        # controller_username: "{{ awx_user }}"
+        # controller_password: "{{ awx_password }}"
+        validate_certs: false
+        name: "JBoss Remediation Project"
+        organization: "Default"
+        scm_type: git
+        scm_url: "https://github.com/adelahozredhat/eda-java-jboss-heapspace.git"
+        wait: yes
+        state: present
+
+    - name: Create EDA Projects
+      ansible.eda.project:
+        controller_host: "{{ awx_host }}"
+        aap_token: "{{ aap_token }}"
+        # controller_username: "{{ awx_user }}"
+        # controller_password: "{{ awx_password }}"
+        validate_certs: false
+        name: "Rulebook"
+        description: "Rulebook"
+        url: "https://github.com/adelahozredhat/eda-java-jboss-heapspace.git"
+        organization_name: Default
+        state: present
+
+    - name: Fedora Machine Credential
+      ansible.controller.credential:
+        controller_host: "{{ awx_host }}"
+        aap_token: "{{ aap_token }}"
+        name: Fedora Credential
+        description: Fedora Credential
+        organization: Default
+        state: present
+        credential_type: Machine
+        inputs:
+          username: fedora
+          ssh_key_data: "{{ lookup('file', 'ssh_tests_connections/id_fedora_new') }}"
+
+    - name: Openshift Credential for Virtualization
+      ansible.controller.credential:
+        controller_host: "{{ awx_host }}"
+        aap_token: "{{ aap_token }}"
+        name: Openshift
+        description: Openshift
+        organization: Default
+        state: present
+        credential_type: OpenShift or Kubernetes API Bearer Token
+        inputs:
+          host: "{{crc_url_api_client}}"
+          verify_ssl: false
+          bearer_token: "{{token.stdout}}"
+
+    - name: Add inventory Openshift Virtualization
+      ansible.controller.inventory:
+        controller_host: "{{ awx_host }}"
+        aap_token: "{{ aap_token }}"
+        name: "Inventory Openshift Virtualization"
+        description: "Inventory Openshift Virtualization"
+        organization: "Default"
+        state: present
+
+    - name: Add an inventory source Openshift Virtualization
+      ansible.controller.inventory_source:
+        controller_host: "{{ awx_host }}"
+        aap_token: "{{ aap_token }}"
+        name: "Openshift Virtualization"
+        description: Openshift Virtualization
+        inventory: Inventory Openshift Virtualization
+        credential: Openshift
+        overwrite: false
+        update_on_launch: false
+        source: openshift_virtualization
+        organization: Default
+        execution_environment: Control Plane Execution Environment
+        source_vars:
+          host_format: '{name}'
+        state: present
+
+    - name: Update a single inventory source
+      ansible.controller.inventory_source_update:
+        controller_host: "{{ awx_host }}"
+        aap_token: "{{ aap_token }}"
+        name: "Openshift Virtualization"
+        inventory: "Inventory Openshift Virtualization"
+        organization: Default
+
+    - name: Crear Job Template para HelloWorld
+      ansible.controller.job_template:
+        controller_host: "{{ awx_host }}"
+        aap_token: "{{ aap_token }}"
+        # controller_username: "{{ awx_user }}"
+        # controller_password: "{{ awx_password }}"
+        validate_certs: false
+        name: "JBoss HelloWorld - OOM Reaction"
+        project: "JBoss Remediation Project"
+        playbook: "helloworld.yml"
+        inventory: "Inventory Openshift Virtualization"
+        credentials:
+          - "Fedora Credential"
+        organization: Default
+        state: present
+        ask_variables_on_launch: true
+
+    - name: Create a rulebook activation
+      ansible.eda.rulebook_activation:
+        controller_host: "{{ awx_host }}"
+        aap_token: "{{ aap_token }}"
+        # controller_username: "{{ awx_user }}"
+        # controller_password: "{{ awx_password }}"
+        validate_certs: false
+        name: "Example Rulebook Activation"
+        description: "Example Rulebook Activation description"
+        project_name: "Rulebook"
+        rulebook_name: "rulebook_webhook.yml"
+        decision_environment_name: "de-supported-rhel9:1.2"
+        restart_policy: always
+        organization: Default
+        eda_credentials: 
+          - AAP Connection
+        state: enabled
+
+    - name: Create route for rulebook
+      kubernetes.core.k8s:
+        host: "{{ crc_url_api_client }}"
+        api_key: "{{ token.stdout }}"
+        validate_certs: "{{crc_validate_certs}}"
+        state: present
+        src: eda-rulebook-activayion-route.yaml
+      register: step
+
+    - name: Get Host Route
+      kubernetes.core.k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        name: "eda-webhook-external"
+        namespace: "ansible-automation-platform"
+      register: route_data
+
+    - name: Get Url
+      debug:
+        msg: "Acceso externo habilitado en: http://{{ route_data.resources[0].spec.host }}"
+
+    - name: Asignar ese dato a un host específico
+      set_fact:
+        end_point_eda_rulebook: "http://{{ route_data.resources[0].spec.host }}"
+      delegate_to: fedora-chocolate-smelt-74
+      delegate_facts: true
+
+    
+
+    # - name: "Delete the Authentication Token used"
+    #   ansible.builtin.uri:
+    #     url: "https://{{ awx_host }}{{aap_oauthtoken_url }}"
+    #     user: "{{ awx_user }}"
+    #     password: "{{ awx_password }}"
+    #     method: DELETE
+    #     force_basic_auth: true
+    #     validate_certs: false
+    #     status_code: 204
+    #   when: aap_oauthtoken_url is defined
+
+- name: Config Fedora Machine and install JBoss
+  hosts: fedora-chocolate-smelt-74
+  gather_facts: no
+  become: yes
+  tasks:
+
+    - name: 
+      shell: fuser -k 2222/tcp
+      delegate_to: localhost
+      become: no
+      ignore_errors: true
+
+    - name: Install java-21 and unzip
+      ansible.builtin.dnf:
+        name: 
+          - java-21-openjdk-devel
+          - unzip
+          # - python-firewall
+          # - firewalld
+        state: present
+
+    - name: Check if exist binaries of Jboss
+      ansible.builtin.stat:
+        path: /opt/jboss-eap-8.1/bin
+      register: jboss_dir
+
+    - name: Unarchive JBoss EAP 8.1
+      ansible.builtin.unarchive:
+        src: "../jboss-eap-8.1.0-dev.zip" # Origen en tu local
+        dest: /opt/                      # Destino en la VM
+        remote_src: no                   # 'no' significa que el archivo está en el host de Ansible
+        owner: fedora
+        group: fedora
+      when: not jboss_dir.stat.exists
+
+    - name: Check if JBoss service exist
+      ansible.builtin.stat:
+        path: /etc/systemd/system/jboss-eap.service
+      register: jboss_eap_service
+
+    - name: Copy jboss-eap service file definition
+      ansible.builtin.copy:
+        src: "jboss-eap.service"
+        dest: /etc/systemd/system
+        owner: fedora
+        group: fedora
+        mode: '0644'
+      when: not jboss_eap_service.stat.exists
+
+    - name: Crear el directorio /opt/datos_fedora
+      ansible.builtin.file:
+        path: /opt/jboss-eap-8.1/standalone/log/dumps/
+        state: directory
+        owner: fedora
+        group: fedora
+        mode: '0755'
+      when: not jboss_eap_service.stat.exists
+
+    - name: Config standalone file config of Jboss to call to EDA
+      ansible.builtin.lineinfile:
+        path: /opt/jboss-eap-8.1/bin/standalone.conf
+        line: |
+          JAVA_OPTS="$JAVA_OPTS -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/opt/jboss-eap-8.1/standalone/log/dumps/ -XX:OnOutOfMemoryError=\"curl -k -H 'Content-Type: application/json' -X POST -d '{\\\"status\\\":\\\"OutOfMemory\\\",\\\"host\\\":\\\"$(hostname)\\\"}' {{end_point_eda_rulebook}}/ \""
+        insertafter: EOF
+      when: not jboss_eap_service.stat.exists
+
+    - name: Enabled and Restart jboss-eap service
+      ansible.builtin.systemd:
+        name: jboss-eap
+        state: stop
+        enabled: yes
+        daemon_reload: yes
+      when: jboss_eap_service.stat.exists
+
+    - name: Clean old deploys information
+      ansible.builtin.file:
+        path: "/opt/jboss-eap-8.1/standalone/deployments/{{ item }}"
+        state: absent
+      loop:
+        - crash.war
+        - crash.war.failed
+        - crash.war.isdeploying
+      when: jboss_eap_service.stat.exists
+
+    - name: Deploy Crash memory application in JBoss
+      ansible.builtin.copy:
+        src: "crash.war"
+        dest: "/opt/jboss-eap-8.1/standalone/deployments/"
+        owner: fedora
+        group: fedora
+        mode: '0644'
+
+    # - name: Abrir puerto 8080 en el firewall de la VM
+    #   ansible.builtin.firewalld:
+    #     port: 8080/tcp
+    #     permanent: true
+    #     state: enabled
+    #     immediate: true
+    #   become: true
+
+    # - name: Iniciar JBoss como servicio
+    #   shell: "nohup /opt/jboss-eap-8.1/bin/standalone.sh -b 0.0.0.0 &"
+
+    - name: Enabled and Restart jboss-eap service
+      ansible.builtin.systemd:
+        name: jboss-eap
+        state: restarted
+        enabled: yes
+        daemon_reload: yes
+
+- name: Install components in Openshift
+  hosts: localhost
+  connection: local
+  gather_facts: no
+
+  vars:
+    crc_url_api_client: "https://api.cluster-bbz5b.dynamic.redhatworkshops.io:6443"
+    crc_user: "admin"
+    crc_password: "MTMyNjMw"
+    crc_validate_certs: false
+  tasks:
+
+    - name: 
+      shell: "oc login --insecure-skip-tls-verify -u {{crc_user}} -p {{crc_password}} {{crc_url_api_client}} "
+
+    - name: 
+      shell: oc whoami --show-token
+      register: token
+
+    - name: Create servicio and route in openshift to expose endpoint of JBoss
+      kubernetes.core.k8s:
+        host: "{{ crc_url_api_client }}"
+        api_key: "{{ token.stdout }}"
+        validate_certs: "{{crc_validate_certs}}"
+        state: present
+        src: jboss-openshift-objects.yaml
+      register: step
+
+    - name: Get Host Route
+      kubernetes.core.k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        name: "jboss-app-route"
+        namespace: "virtualization-test"
+      register: route_data
+
+    - name: Get Url
+      debug:
+        msg: "Acceso externo habilitado en: http://{{ route_data.resources[0].spec.host }}"

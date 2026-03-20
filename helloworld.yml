@@ -1,0 +1,22 @@
+---
+- name: Playbook de Respuesta a Incidente
+  hosts: "{{target_host}}"
+  become: yes
+  tasks:
+    - name: Example from an Ansible Playbook
+      ansible.builtin.ping:
+
+    - name: Mostrar mensaje de alerta
+      debug:
+        msg: "¡Hola! He recibido una alerta de Heap Space. Iniciando diagnóstico automático..."
+
+    - name: Simular acción de corrección
+      debug:
+        msg: "El evento vino del host: {{ target_host | default('Desconocido') }}"
+
+    - name: Enabled and Restart jboss-eap service
+      ansible.builtin.systemd:
+        name: jboss-eap
+        state: restarted
+        enabled: yes
+        daemon_reload: yes
