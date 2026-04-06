@@ -1,0 +1,46 @@
+#---
+#kind: Secret
+#apiVersion: v1
+#metadata:
+#  name: gitea-admin-password
+#  namespace: gitea-operator
+#data:
+#  password: cmVkaGF0MDA=
+#type: Opaque
+#---
+#kind: Secret
+#apiVersion: v1
+#metadata:
+#  name: gitea-user-password
+#  namespace: gitea-operator
+#data:
+#  password: cmVkaGF0MDA=
+#type: Opaque
+---
+kind: Gitea
+apiVersion: pfe.rhpds.com/v1
+metadata:
+  name: repository
+  namespace: gitea-operator
+spec:
+  giteaSsl: true
+
+  giteaAdminUser: opentlc-mgr
+  giteaAdminPassword: "opentlc-mgr"
+  giteaAdminPasswordLength: 32
+  giteaAdminEmail: opentlc-mgr@redhat.com
+
+  giteaCreateUsers: true
+  giteaGenerateUserFormat: "lab-user-%d"
+  giteaUserNumber: {{num_users|int}}
+  giteaUserPassword: openshift
+
+  giteaMigrateRepositories: true
+  giteaRepositoriesList:
+  - repo: https://github.com/adelahozredhat/lab-aap-ansible-exercise1.git
+    name: lab-aap-ansible-exercise1
+    private: false
+  - repo: https://github.com/adelahozredhat/lab-aap-ansible-instruction.git
+    name: lab-aap-ansible-instruction
+    private: false
+
