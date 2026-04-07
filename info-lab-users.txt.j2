@@ -15,6 +15,9 @@ Login Openshift Info: {{ usuarios_finales["user"~i].login_command }}
 Openshift Console URL: {{ usuarios_finales["user"~i].openshift_console_url }}
 User: {{ usuarios_finales["user"~i].user }}
 Password: {{ usuarios_finales["user"~i].password }}
+AAP insance: https://example{{ i-1 }}-ansible-automation-platform{{ i-1 }}.apps.{{cluster_domain}}
+AAP user: admin
+AAP password: admin
 
 {{info_machines[i-1]}}
 
